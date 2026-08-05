@@ -55,7 +55,6 @@ experience_options = ["beginner", "intermediate", "advanced"]
 
 
 def generate_plan(equipment, goal, days_per_week, experience_level):
-    """Generates a structured weekly plan based on user parameters."""
     exercises = EXERCISE_DB[equipment]
     scheme = REP_SCHEMES[goal]
 
@@ -147,8 +146,8 @@ else:
         st.error(f"Error loading profile: {e}")
         existing_profile = None
 
-    tab_profile, tab_generate, tab_myplans, tab_log, tab_progress = st.tabs(
-        ["👤 Profile", "🎯 Generate Plan", "📋 My Plans", "📝 Log Workout", "📈 Progress"]
+    tab_profile, tab_generate, tab_myplans, tab_log, tab_progress, tab_strength = st.tabs(
+        ["👤 Profile", "🎯 Generate Plan", "📋 My Plans", "📝 Log Workout", "📈 Progress", "💪 Strength Level"]
     )
 
     # --- TAB: PROFILE ---
@@ -409,5 +408,57 @@ else:
         except Exception as e:
             st.error(f"Error loading progress: {e}")
 
+    # --- TAB: STRENGTH LEVEL ---
+    with tab_strength:
+        st.subheader("Compare your strength level")
+        st.caption("Based on your one-rep max (or estimated max) compared to public strength standards.")
+
+        if not existing_profile or not existing_profile.get('body_weight_kg') or not existing_profile.get('gender'):
+            st.warning("Please complete your profile (body weight and gender) first.")
+        else:
+            comparison_exercises = ["Bench Press", "Squat", "Deadlift"]
+            selected_lift = st.selectbox("Select lift", comparison_exercises)
+            your_max = st.number_input(f"Your {selected_lift} 1-rep max (kg)", min_value=0.0, max_value=500.0, value=60.0, step=2.5)
+
+            if st.button("🏆 Check my level", type="primary"):
+                try:
+                    standards_response = supabase.table("strength_standards").select("*").eq(
+                        "exercise_name", selected_lift
+                    ).eq("gender", existing_profile['gender']).execute()
+                    standards_data = standards_response.data
+
+                    if not standards_data:
+                        st.error("No standards found for this exercise/gender combination.")
+                    else:
+                        body_weight = existing_profile['body_weight_kg']
+                        your_ratio = your_max / body_weight
+
+                        standards_sorted = sorted(standards_data, key=lambda s: s['bodyweight_ratio'])
+
+                        level_reached = "below beginner"
+                        for standard in standards_sorted:
+                            if your_ratio >= standard['bodyweight_ratio']:
+                                level_reached = standard['level']
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Your ratio (lift/bodyweight)", f"{your_ratio:.2f}x")
+                        with col2:
+                            st.metric("Your level", level_reached.capitalize())
+
+                        st.divider()
+                        st.markdown("**Standards for your gender:**")
+                        df_standards = pd.DataFrame(standards_sorted)
+                        df_standards['Weight needed (kg)'] = (df_standards['bodyweight_ratio'] * body_weight).round(1)
+                        st.dataframe(
+                            df_standards[['level', 'bodyweight_ratio', 'Weight needed (kg)']].rename(columns={
+                                'level': 'Level', 'bodyweight_ratio': 'Ratio'
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+                except Exception as e:
+                    st.error(f"Error checking strength level: {e}")
+
 st.divider()
-st.caption("ForzaTrack • Phase 4: workout logging and progress tracking")
+st.caption("ForzaTrack • Complete: profile, plan generator, logging, progress, and strength comparison")
