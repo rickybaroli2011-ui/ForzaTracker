@@ -1,6 +1,7 @@
 import streamlit as st
 from supabase import create_client
 import pandas as pd
+from numpy import polyfit
 
 st.set_page_config(page_title="ForzaTrack", page_icon="🏋️", layout="wide")
 
@@ -17,7 +18,7 @@ if "access_token" not in st.session_state:
 st.title("🏋️ ForzaTrack")
 st.caption("Generate your plan, track your progress, compare your strength.")
 
-# --- EXERCISE DATABASE (organized by equipment and muscle group) ---
+# --- EXERCISE DATABASE ---
 EXERCISE_DB = {
     "full_gym": {
         "push": ["Bench Press", "Overhead Press", "Incline Dumbbell Press", "Dips", "Cable Fly"],
@@ -46,13 +47,18 @@ REP_SCHEMES = {
     "endurance": {"sets": 3, "reps": "15-20"}
 }
 
+equipment_options = ["full_gym", "home_dumbbells", "bodyweight_only"]
+equipment_labels = {"full_gym": "Full gym", "home_dumbbells": "Home with dumbbells", "bodyweight_only": "Bodyweight only"}
+goal_options = ["strength", "hypertrophy", "fat_loss", "endurance"]
+goal_labels = {"strength": "Strength", "hypertrophy": "Hypertrophy (muscle size)", "fat_loss": "Fat loss", "endurance": "Endurance"}
+experience_options = ["beginner", "intermediate", "advanced"]
+
 
 def generate_plan(equipment, goal, days_per_week, experience_level):
     """Generates a structured weekly plan based on user parameters."""
     exercises = EXERCISE_DB[equipment]
     scheme = REP_SCHEMES[goal]
 
-    # Adjust volume slightly by experience level
     sets_adjustment = {"beginner": -1, "intermediate": 0, "advanced": 1}
     adjusted_sets = max(2, scheme["sets"] + sets_adjustment[experience_level])
 
@@ -141,7 +147,9 @@ else:
         st.error(f"Error loading profile: {e}")
         existing_profile = None
 
-    tab_profile, tab_generate, tab_myplans = st.tabs(["👤 Profile", "🎯 Generate Plan", "📋 My Plans"])
+    tab_profile, tab_generate, tab_myplans, tab_log, tab_progress = st.tabs(
+        ["👤 Profile", "🎯 Generate Plan", "📋 My Plans", "📝 Log Workout", "📈 Progress"]
+    )
 
     # --- TAB: PROFILE ---
     with tab_profile:
@@ -169,7 +177,6 @@ else:
 
         col4, col5 = st.columns(2)
         with col4:
-            experience_options = ["beginner", "intermediate", "advanced"]
             experience_level = st.selectbox(
                 "Experience level", experience_options,
                 index=experience_options.index(existing_profile['experience_level']) if existing_profile and existing_profile.get('experience_level') else 0
@@ -182,16 +189,12 @@ else:
 
         col6, col7 = st.columns(2)
         with col6:
-            equipment_options = ["full_gym", "home_dumbbells", "bodyweight_only"]
-            equipment_labels = {"full_gym": "Full gym", "home_dumbbells": "Home with dumbbells", "bodyweight_only": "Bodyweight only"}
             equipment = st.selectbox(
                 "Available equipment", equipment_options,
                 format_func=lambda x: equipment_labels[x],
                 index=equipment_options.index(existing_profile['equipment']) if existing_profile and existing_profile.get('equipment') else 0
             )
         with col7:
-            goal_options = ["strength", "hypertrophy", "fat_loss", "endurance"]
-            goal_labels = {"strength": "Strength", "hypertrophy": "Hypertrophy (muscle size)", "fat_loss": "Fat loss", "endurance": "Endurance"}
             goal = st.selectbox(
                 "Main goal", goal_options,
                 format_func=lambda x: goal_labels[x],
@@ -240,7 +243,6 @@ else:
                     existing_profile['available_days'],
                     existing_profile['experience_level']
                 )
-
                 st.session_state.generated_plan_preview = generated_days
                 st.session_state.generated_plan_name = plan_name
 
@@ -307,5 +309,105 @@ else:
         except Exception as e:
             st.error(f"Error loading plans: {e}")
 
+    # --- TAB: LOG WORKOUT ---
+    with tab_log:
+        st.subheader("Log a workout")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            log_date = st.date_input("Date", value=pd.Timestamp.today())
+            exercise_name = st.text_input("Exercise", placeholder="e.g. Bench Press")
+        with col2:
+            sets = st.number_input("Sets", min_value=1, max_value=20, value=3)
+            reps = st.number_input("Reps", min_value=1, max_value=100, value=10)
+        weight_kg = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=20.0, step=2.5)
+
+        if st.button("💾 Save log", type="primary", use_container_width=True):
+            if not exercise_name.strip():
+                st.warning("Please enter an exercise name.")
+            else:
+                try:
+                    supabase.table("workout_logs").insert({
+                        "user_id": user.id,
+                        "log_date": log_date.isoformat(),
+                        "exercise_name": exercise_name.strip(),
+                        "sets": int(sets),
+                        "reps": int(reps),
+                        "weight_kg": float(weight_kg)
+                    }).execute()
+                    st.success("Workout logged!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error saving log: {e}")
+
+    # --- TAB: PROGRESS ---
+    with tab_progress:
+        st.subheader("Your progress over time")
+        try:
+            logs_response = supabase.table("workout_logs").select("*").order("log_date").execute()
+            logs_data = logs_response.data
+
+            if not logs_data:
+                st.info("No workouts logged yet. Log one in the 'Log Workout' tab.")
+            else:
+                df_logs = pd.DataFrame(logs_data)
+                df_logs['log_date'] = pd.to_datetime(df_logs['log_date'])
+
+                exercises_available = sorted(df_logs['exercise_name'].unique())
+                selected_exercise = st.selectbox("Select exercise", exercises_available)
+
+                df_exercise = df_logs[df_logs['exercise_name'] == selected_exercise].sort_values('log_date')
+
+                if len(df_exercise) < 2:
+                    st.info("Log this exercise at least twice to see a progress chart.")
+                    st.dataframe(
+                        df_exercise[['log_date', 'sets', 'reps', 'weight_kg']].rename(columns={
+                            'log_date': 'Date', 'sets': 'Sets', 'reps': 'Reps', 'weight_kg': 'Weight (kg)'
+                        }),
+                        use_container_width=True, hide_index=True
+                    )
+                else:
+                    st.line_chart(df_exercise.set_index('log_date')['weight_kg'])
+
+                    df_exercise = df_exercise.reset_index(drop=True)
+                    df_exercise['days_since_start'] = (df_exercise['log_date'] - df_exercise['log_date'].min()).dt.days
+
+                    if df_exercise['days_since_start'].nunique() > 1:
+                        x = df_exercise['days_since_start'].values
+                        y = df_exercise['weight_kg'].values
+                        slope, intercept = polyfit(x, y, 1)
+
+                        st.divider()
+                        st.markdown("### 🔮 Simple projection")
+
+                        if slope > 0:
+                            current_weight = y[-1]
+                            target_weight = st.number_input(
+                                f"Target weight for {selected_exercise} (kg)",
+                                min_value=current_weight, max_value=current_weight + 200.0,
+                                value=current_weight + 10.0, step=2.5
+                            )
+                            days_needed = (target_weight - intercept) / slope - x[-1]
+                            if days_needed > 0:
+                                weeks_needed = days_needed / 7
+                                st.metric(
+                                    f"Estimated time to reach {target_weight}kg",
+                                    f"~{weeks_needed:.1f} weeks"
+                                )
+                                st.caption("Rough estimate based on your recent trend. Real progress depends on many factors (recovery, nutrition, consistency).")
+                            else:
+                                st.info("You may have already reached this target based on your trend!")
+                        else:
+                            st.info("Your recent trend is flat or decreasing — no clear projection available. Keep logging to refine this.")
+
+                        st.dataframe(
+                            df_exercise[['log_date', 'sets', 'reps', 'weight_kg']].rename(columns={
+                                'log_date': 'Date', 'sets': 'Sets', 'reps': 'Reps', 'weight_kg': 'Weight (kg)'
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
+        except Exception as e:
+            st.error(f"Error loading progress: {e}")
+
 st.divider()
-st.caption("ForzaTrack • Phase 3: plan generator")
+st.caption("ForzaTrack • Phase 4: workout logging and progress tracking")
